@@ -1,0 +1,854 @@
+              <!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>3D Сфера — Гра</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#05060a;}
+  canvas{display:block;touch-action:none;}
+  #hint{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);
+        color:#9fb;font:12px/1.4 system-ui,sans-serif;opacity:.5;pointer-events:none;
+        text-align:center;white-space:nowrap;user-select:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">верх — швидше · низ — повільніше · ліво/право — поворот</div>
+<script>
+(() => {
+'use strict';
+
+/* ============================ БАЗА ============================ */
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0;
+
+const TAU   = Math.PI * 2;
+const rand  = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const d2    = (ax, ay, bx, by) => { const dx = ax - bx, dy = ay - by; return dx*dx + dy*dy; };
+const angDiff = (a, b) => {
+  let d = (a - b) % TAU;
+  if (d >  Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return d;
+};
+
+function resize() { W = cv.width = window.innerWidth; H = cv.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+/* ============================ КАМО ============================ */
+function makeCamo() {
+  const n = randInt(4, 8), arr = [];
+  for (let i = 0; i < n; i++) {
+    arr.push({
+      dx:  rand(-0.70, 0.70),
+      dy:  rand(-0.70, 0.70),
+      rx:  rand(0.12, 0.34),
+      ry:  rand(0.10, 0.30),
+      rot: rand(0, Math.PI),
+      h:   rand(40, 115),
+      s:   rand(12, 45),
+      l:   rand(10, 34),
+      a:   rand(0.35, 0.72)
+    });
+  }
+  return arr;
+}
+
+/* ============================ М'ЯЧ ============================ */
+const player = {
+  x: 0, y: 0, angle: 0, speed: 3, r: 20, score: 0,
+  hue: 0, hueTarget: 0, hueTimer: 0,
+  camo: [], camoTimer: 0,
+  arrowHue: 0, arrowTimer: 0
+};
+
+function resetPlayer() {
+  player.x = W / 2; player.y = H / 2;
+  player.angle = rand(0, TAU);
+  player.speed = 3;
+  player.score = 0;
+  player.hue = player.hueTarget = rand(0, 360);
+  player.camo = makeCamo();
+  player.camoTimer = 0;
+}
+
+/* ============================ ТОЧКИ (орби) ============================ */
+const GREEN_N = 99, RED_N = 111;
+const orbs = [];
+
+function makeOrb(type) {
+  return {
+    type,
+    x: rand(16, Math.max(17, W - 16)),
+    y: rand(16, Math.max(17, H - 16)),
+    vx: rand(-0.25, 0.25),
+    vy: rand(-0.25, 0.25),
+    r: type === 'g' ? 5 : 6,
+    hue: type === 'g' ? rand(95, 145) : rand(-12, 14),
+    light: 55,
+    phase: rand(0, TAU)
+  };
+}
+
+function initOrbs() {
+  orbs.length = 0;
+  for (let i = 0; i < GREEN_N; i++) orbs.push(makeOrb('g'));
+  for (let i = 0; i < RED_N;   i++) orbs.push(makeOrb('r'));
+}
+function respawnOrb(o) {
+  o.x = rand(16, Math.max(17, W - 16));
+  o.y = rand(16, Math.max(17, H - 16));
+}
+
+/* ============================ ЛІНІЇ (22 безьє) ============================ */
+const LINE_COUNT = 22;
+const lines = [];
+let lineTimer = 0;
+
+function buildLines() {
+  lines.length = 0;
+  for (let i = 0; i < LINE_COUNT; i++) {
+    const len   = rand(111, 333);
+    const bumps = randInt(1, 6);
+    const c1x = -len * 0.25, c1y = rand(-1, 1) * len * 0.30;
+    const c2x =  len * 0.25, c2y = rand(-1, 1) * len * 0.30;
+    const N = 48;
+    const pts = [];
+    for (let j = 0; j <= N; j++) {
+      const t = j / N, mt = 1 - t;
+      let x = mt*mt*mt*(-len/2) + 3*mt*mt*t*c1x + 3*mt*t*t*c2x + t*t*t*(len/2);
+      let y = 3*mt*mt*t*c1y + 3*mt*t*t*c2y;
+      y += Math.sin(t * Math.PI * bumps * 2 + i * 1.7) * len * 0.055;
+      pts.push({ x, y });
+    }
+    const gaps = [];
+    for (let g = 0; g < 5; g++) {
+      const s = rand(0, 0.94);
+      gaps.push([s, s + 0.05]);
+    }
+    const L = {
+      cx: rand(len * 0.6, Math.max(len * 0.6 + 1, W - len * 0.6)),
+      cy: rand(len * 0.6, Math.max(len * 0.6 + 1, H - len * 0.6)),
+      angle: rand(0, TAU),
+      rotSpeed: rand(-0.09, 0.09),
+      vx: rand(-0.22, 0.22),
+      vy: rand(-0.22, 0.22),
+      w: rand(1, 4),
+      hueA: rand(0, 360),
+      hueB: rand(0, 360),
+      pts, gaps, segs: [], bb: null, N
+    };
+    updateLine(L);
+    lines.push(L);
+  }
+  lineTimer = 0;
+}
+
+function updateLine(L) {
+  const ca = Math.cos(L.angle), sa = Math.sin(L.angle);
+  const wp = new Array(L.pts.length);
+  for (let i = 0; i < L.pts.length; i++) {
+    const p = L.pts[i];
+    wp[i] = { x: L.cx + p.x * ca - p.y * sa, y: L.cy + p.x * sa + p.y * ca };
+  }
+  L.wp = wp;
+  L.segs.length = 0;
+  let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+  const N = L.pts.length - 1;
+  for (let i = 0; i < N; i++) {
+    const t = (i + 0.5) / N;
+    let gap = false;
+    for (let g = 0; g < L.gaps.length; g++) {
+      if (t >= L.gaps[g][0] && t <= L.gaps[g][1]) { gap = true; break; }
+    }
+    if (gap) continue;
+    const a = wp[i], b = wp[i + 1];
+    L.segs.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y, t });
+    if (a.x < minx) minx = a.x; if (a.x > maxx) maxx = a.x;
+    if (b.x < minx) minx = b.x; if (b.x > maxx) maxx = b.x;
+    if (a.y < miny) miny = a.y; if (a.y > maxy) maxy = a.y;
+    if (b.y < miny) miny = b.y; if (b.y > maxy) maxy = b.y;
+  }
+  L.bb = { minx, miny, maxx, maxy };
+}
+
+function updateLines(dt) {
+  lineTimer += dt;
+  if (lineTimer >= 60) buildLines();
+
+  for (const L of lines) {
+    L.angle += L.rotSpeed * dt;
+    L.cx += L.vx * dt * 60;
+    L.cy += L.vy * dt * 60;
+    updateLine(L);
+    // не виходять за екран
+    const bb = L.bb;
+    if (bb.minx < 2)      { L.cx += (2 - bb.minx);      L.vx =  Math.abs(L.vx); }
+    if (bb.maxx > W - 2)  { L.cx -= (bb.maxx - (W - 2)); L.vx = -Math.abs(L.vx); }
+    if (bb.miny < 2)      { L.cy += (2 - bb.miny);      L.vy =  Math.abs(L.vy); }
+    if (bb.maxy > H - 2)  { L.cy -= (bb.maxy - (H - 2)); L.vy = -Math.abs(L.vy); }
+  }
+}
+
+/* ============================ ЕКРАНИ-СТІНИ (8) ============================ */
+const screens = [];
+
+function initScreens() {
+  screens.length = 0;
+  const dirs = [
+    [-1, 0], [1, 0], [0, -1], [0, 1],
+    [-0.7071, -0.7071], [0.7071, -0.7071],
+    [-0.7071,  0.7071], [0.7071,  0.7071]
+  ];
+  const R  = Math.min(W, H) * 0.30;
+  const cx = W / 2, cy = H / 2;
+  const far = Math.hypot(W, H) * 0.55 + 220;
+
+  for (let i = 0; i < 8; i++) {
+    const [dx, dy] = dirs[i];
+    const tx = cx + dx * R,  ty = cy + dy * R;
+    const sx = cx + dx * far, sy = cy + dy * far;
+    const durIn = rand(20, 30);
+    screens.push({
+      x: sx, y: sy, sx, sy, tx, ty,
+      angle: Math.atan2(dy, dx) + Math.PI / 2,
+      len: rand(130, 200),
+      thick: rand(20, 30),
+      hue: rand(0, 360),
+      bumps: randInt(1, 4),
+      bumpAmp: rand(2, 6),
+      bphase: rand(0, TAU),
+      durIn, durOut: durIn * rand(1.4, 1.9),
+      timer: 0, st: 'in'
+    });
+  }
+}
+
+function updateScreens(dt) {
+  for (const s of screens) {
+    s.timer += dt;
+    s.bphase += dt * 1.2;
+
+    if (s.st === 'in') {
+      const t = Math.min(1, s.timer / s.durIn);
+      const e = t * t * (3 - 2 * t);
+      s.x = s.sx + (s.tx - s.sx) * e;
+      s.y = s.sy + (s.ty - s.sy) * e;
+      if (t >= 1) { s.st = 'hold'; s.timer = 0; s.x = s.tx; s.y = s.ty; }
+    } else if (s.st === 'hold') {
+      s.x = s.tx; s.y = s.ty;
+      if (s.timer >= 11) { s.st = 'out'; s.timer = 0; }
+    } else {
+      const t = Math.min(1, s.timer / s.durOut);
+      const e = t * t * (3 - 2 * t);
+      s.x = s.tx + (s.sx - s.tx) * e;
+      s.y = s.ty + (s.sy - s.ty) * e;
+      if (t >= 1) { s.st = 'in'; s.timer = 0; }
+    }
+  }
+}
+
+/* ============================ КОЛІЗІЇ ============================ */
+function segCollide(px, py, r, sg, w) {
+  const dx = sg.bx - sg.ax, dy = sg.by - sg.ay;
+  const l2 = dx * dx + dy * dy;
+  if (l2 < 1e-9) return null;
+  let t = ((px - sg.ax) * dx + (py - sg.ay) * dy) / l2;
+  t = clamp(t, 0, 1);
+  const cx = sg.ax + dx * t, cy = sg.ay + dy * t;
+  const ex = px - cx, ey = py - cy;
+  const dd = ex * ex + ey * ey;
+  const rr = r + w * 0.5;
+  if (dd > rr * rr) return null;
+  const d = Math.sqrt(dd) || 0.001;
+  return { nx: ex / d, ny: ey / d };
+}
+
+function obbCollide(x, y, r, s) {
+  const cs = Math.cos(-s.angle), sn = Math.sin(-s.angle);
+  const dx = x - s.x, dy = y - s.y;
+  const lx = dx * cs - dy * sn;
+  const ly = dx * sn + dy * cs;
+  const hw = s.len * 0.5, hh = s.thick * 0.5;
+  const qx = clamp(lx, -hw, hw);
+  const qy = clamp(ly, -hh, hh);
+  const ex = lx - qx, ey = ly - qy;
+  const dd = ex * ex + ey * ey;
+  if (dd > r * r) return null;
+
+  let nlx, nly;
+  if (dd > 1e-6) {
+    const d = Math.sqrt(dd);
+    nlx = ex / d; nly = ey / d;
+  } else {
+    const px = hw - Math.abs(lx), py = hh - Math.abs(ly);
+    if (px < py) { nlx = Math.sign(lx) || 1; nly = 0; }
+    else         { nlx = 0; nly = Math.sign(ly) || 1; }
+  }
+  const c2 = Math.cos(s.angle), s2 = Math.sin(s.angle);
+  return { nx: nlx * c2 - nly * s2, ny: nlx * s2 + nly * c2 };
+}
+
+function collideAt(x, y, r) {
+  if (x - r < 0) return { nx: 1,  ny: 0 };
+  if (x + r > W) return { nx: -1, ny: 0 };
+  if (y - r < 0) return { nx: 0,  ny: 1 };
+  if (y + r > H) return { nx: 0,  ny: -1 };
+
+  for (let i = 0; i < screens.length; i++) {
+    const s = screens[i];
+    if (s.x < -260 || s.x > W + 260 || s.y < -260 || s.y > H + 260) continue;
+    const n = obbCollide(x, y, r, s);
+    if (n) return n;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i], bb = L.bb;
+    if (!bb) continue;
+    if (x + r < bb.minx || x - r > bb.maxx || y + r < bb.miny || y - r > bb.maxy) continue;
+    for (let j = 0; j < L.segs.length; j++) {
+      const n = segCollide(x, y, r, L.segs[j], L.w);
+      if (n) return n;
+    }
+  }
+  return null;
+}
+
+function reflect(angle, nx, ny) {
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  const d = dx * nx + dy * ny;
+  return Math.atan2(dy - 2 * d * ny, dx - 2 * d * nx);
+}
+
+/* ============================ РУХ М'ЯЧА (підкроки 0.5px) ============================ */
+function movePlayer(dt) {
+  let remaining = player.speed * dt * 60;
+  let guard = 0;
+  while (remaining > 0.001 && guard++ < 400) {
+    const s = Math.min(0.5, remaining);
+    remaining -= s;
+    const nx = player.x + Math.cos(player.angle) * s;
+    const ny = player.y + Math.sin(player.angle) * s;
+    const hit = collideAt(nx, ny, player.r);
+    if (hit) {
+      player.angle = reflect(player.angle, hit.nx, hit.ny);
+      player.x = nx + hit.nx * 0.7;
+      player.y = ny + hit.ny * 0.7;
+    } else {
+      player.x = nx; player.y = ny;
+    }
+    player.x = clamp(player.x, player.r, W - player.r);
+    player.y = clamp(player.y, player.r, H - player.r);
+  }
+}
+
+/* ============================ КЕРУВАННЯ ============================ */
+const pointers = new Map();
+
+function zoneAt(x, y) {
+  if (y < H * 0.25) return 'up';
+  if (y > H * 0.75) return 'down';
+  return x < W * 0.5 ? 'left' : 'right';
+}
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, zone: zoneAt(e.clientX, e.clientY) });
+});
+cv.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (p) { p.x = e.clientX; p.y = e.clientY; p.zone = zoneAt(e.clientX, e.clientY); }
+});
+const drop = e => pointers.delete(e.pointerId);
+cv.addEventListener('pointerup', drop);
+cv.addEventListener('pointercancel', drop);
+cv.addEventListener('pointerleave', drop);
+
+/* ============================ AI-СФЕРИ (5) ============================ */
+const ais = [];
+
+function initAIs() {
+  ais.length = 0;
+  for (let i = 0; i < 5; i++) {
+    ais.push({
+      n: i + 1,
+      x: rand(W * 0.2, W * 0.8),
+      y: rand(H * 0.2, H * 0.8),
+      angle: rand(0, TAU),
+      speed: rand(1.8, 3.2),
+      r: 15,
+      score: 0,
+      hue: rand(0, 360),
+      hueTarget: rand(0, 360),
+      hueTimer: 0,
+      camo: makeCamo(),
+      camoTimer: rand(0, 11),
+      timer: 0,
+      wander: 0,
+      spiralT: 0,
+      spiralPhase: 'out',
+      spiralCenter: null,
+      weights: [0, 0, 0, 0, 0],
+      lastAction: 2,
+      lastScore: 0,
+      decideTimer: 1
+    });
+  }
+}
+
+function moveAI(a, dt) {
+  const sp = a.speed * dt * 60;
+  let nx = a.x + Math.cos(a.angle) * sp;
+  let ny = a.y + Math.sin(a.angle) * sp;
+  if (nx < a.r)     { nx = a.r;     a.angle = Math.PI - a.angle; }
+  if (nx > W - a.r) { nx = W - a.r; a.angle = Math.PI - a.angle; }
+  if (ny < a.r)     { ny = a.r;     a.angle = -a.angle; }
+  if (ny > H - a.r) { ny = H - a.r; a.angle = -a.angle; }
+  a.x = nx; a.y = ny;
+}
+
+function updateAI(a, dt) {
+  a.timer += dt;
+
+  /* колір — швидка рандомна зміна */
+  a.hueTimer -= dt;
+  if (a.hueTimer <= 0) { a.hueTimer = rand(0.15, 0.45); a.hueTarget = rand(0, 360); }
+  a.hue += angDiff(a.hueTarget, a.hue) * Math.min(1, dt * 8);
+
+  /* камо — кожні 11с */
+  a.camoTimer += dt;
+  if (a.camoTimer >= 11) { a.camoTimer = 0; a.camo = makeCamo(); }
+
+  let desired = a.angle;
+
+  switch (a.n) {
+    /* 1 — плавний рандомний кут і швидкість */
+    case 1: {
+      a.wander += rand(-1, 1) * dt * 2.4;
+      a.wander = clamp(a.wander, -0.55, 0.55);
+      desired = a.angle + a.wander;
+      if (a.timer > 1.2) {
+        a.timer = 0;
+        a.speed = clamp(a.speed + rand(-1.2, 1.2), 1, 6);
+      }
+      break;
+    }
+
+    /* 2 — до найближчого зеленого, геть від 5 найближчих червоних */
+    case 2: {
+      let best = null, bd = Infinity;
+      for (let i = 0; i < orbs.length; i++) {
+        const o = orbs[i];
+        if (o.type !== 'g') continue;
+        const dd = d2(a.x, a.y, o.x, o.y);
+        if (dd < bd) { bd = dd; best = o; }
+      }
+      let fx = 0, fy = 0;
+      if (best) {
+        const d = Math.sqrt(bd) || 1;
+        fx += (best.x - a.x) / d;
+        fy += (best.y - a.y) / d;
+      }
+      const reds = [];
+      for (let i = 0; i < orbs.length; i++) {
+        const o = orbs[i];
+        if (o.type !== 'r') continue;
+        reds.push({ o, dd: d2(a.x, a.y, o.x, o.y) });
+      }
+      reds.sort((p, q) => p.dd - q.dd);
+      const lim = Math.min(5, reds.length);
+      for (let i = 0; i < lim; i++) {
+        const { o, dd } = reds[i];
+        const d = Math.sqrt(dd) || 1;
+        const w = 220 / (d + 40);
+        fx -= (o.x - a.x) / d * w;
+        fy -= (o.y - a.y) / d * w;
+      }
+      if (fx || fy) desired = Math.atan2(fy, fx);
+      a.speed = 3;
+      break;
+    }
+
+    /* 3 — по лінії руху, де більше зелених */
+    case 3: {
+      let bestA = a.angle, bestS = -Infinity;
+      for (let i = -3; i <= 3; i++) {
+        const ang = a.angle + i * 0.26;
+        const cx = a.x + Math.cos(ang) * 130;
+        const cy = a.y + Math.sin(ang) * 130;
+        let sc = Math.cos(ang - a.angle) * 0.4;
+        for (let j = 0; j < orbs.length; j++) {
+          const o = orbs[j];
+          if (d2(cx, cy, o.x, o.y) < 130 * 130) sc += (o.type === 'g' ? 1 : -2);
+        }
+        if (sc > bestS) { bestS = sc; bestA = ang; }
+      }
+      desired = bestA;
+      a.speed = 3.2;
+      break;
+    }
+
+    /* 4 — спіраль назовні, потім спіраль навколо рандомної точки */
+    case 4: {
+      a.spiralT += dt;
+      if (a.spiralPhase === 'out') {
+        a.speed = 3.4;
+        desired = a.angle + 0.09;
+        if (a.spiralT > rand(4, 7)) {
+          a.spiralPhase = 'around';
+          a.spiralT = 0;
+          a.spiralCenter = { x: rand(90, Math.max(91, W - 90)), y: rand(90, Math.max(91, H - 90)) };
+        }
+      } else {
+        const c = a.spiralCenter;
+        const ang = Math.atan2(a.y - c.y, a.x - c.x) + 0.16;
+        const rad = 55 + Math.sin(a.spiralT * 0.9) * 35;
+        const tx = c.x + Math.cos(ang) * rad;
+        const ty = c.y + Math.sin(ang) * rad;
+        desired = Math.atan2(ty - a.y, tx - a.x);
+        a.speed = 2.8;
+        if (a.spiralT > 7) { a.spiralPhase = 'out'; a.spiralT = 0; }
+      }
+      break;
+    }
+
+    /* 5 — сам навчається (bandit-алгоритм на 5 дій повороту) */
+    case 5: {
+      a.decideTimer -= dt;
+      if (a.decideTimer <= 0) {
+        const reward = a.score - a.lastScore;
+        a.weights[a.lastAction] = a.weights[a.lastAction] * 0.85 + reward * 0.35;
+        a.lastScore = a.score;
+
+        let bestI = 2, bestV = -Infinity;
+        for (let i = 0; i < 5; i++) {
+          const v = a.weights[i] + Math.random() * 0.45;
+          if (v > bestV) { bestV = v; bestI = i; }
+        }
+        a.lastAction = bestI;
+        a.decideTimer = 1.1;
+      }
+      desired = a.angle + (a.lastAction - 2) * 0.14;
+      a.speed = 3;
+      break;
+    }
+  }
+
+  a.angle += angDiff(desired, a.angle) * Math.min(1, dt * 5);
+  moveAI(a, dt);
+}
+
+/* ============================ ОНОВЛЕННЯ ============================ */
+let arrowTick = 0;
+
+function update(dt) {
+  /* --- керування швидкістю --- */
+  let acc = 0, steer = 0;
+  for (const p of pointers.values()) {
+    if (p.zone === 'up')   acc += 0.3;
+    if (p.zone === 'down') acc -= 0.2;
+    if (p.zone === 'left') {
+      const t = clamp((W * 0.5 - p.x) / (W * 0.5), 0, 1);
+      steer -= (1 + 9 * t);
+    }
+    if (p.zone === 'right') {
+      const t = clamp((p.x - W * 0.5) / (W * 0.5), 0, 1);
+      steer += (1 + 9 * t);
+    }
+  }
+  player.speed = clamp(player.speed + acc * dt * 6, 0.5, 14);
+  /* 1..10 градусів за кадр → масштабуємо у градуси/сек */
+  player.angle += steer * 5 * Math.PI / 180 * dt;
+
+  /* --- рух м'яча --- */
+  movePlayer(dt);
+
+  /* --- колір сфери: плавно рандомний --- */
+  player.hueTimer -= dt;
+  if (player.hueTimer <= 0) { player.hueTimer = rand(1.6, 3.2); player.hueTarget = rand(0, 360); }
+  player.hue += angDiff(player.hueTarget, player.hue) * Math.min(1, dt * 1.8);
+
+  /* --- камо кожні 11с --- */
+  player.camoTimer += dt;
+  if (player.camoTimer >= 11) { player.camoTimer = 0; player.camo = makeCamo(); }
+
+  /* --- стрілка: швидка рандомна світла --- */
+  arrowTick -= dt;
+  if (arrowTick <= 0) { arrowTick = 0.055; player.arrowHue = rand(0, 360); }
+
+  /* --- точки --- */
+  for (const o of orbs) {
+    o.x += o.vx * dt * 60;
+    o.y += o.vy * dt * 60;
+    if (o.x < o.r || o.x > W - o.r) { o.vx *= -1; o.x = clamp(o.x, o.r, W - o.r); }
+    if (o.y < o.r || o.y > H - o.r) { o.vy *= -1; o.y = clamp(o.y, o.r, H - o.r); }
+    o.light = 45 + Math.random() * 28;   // швидка рандомна яскравість
+    o.phase += dt * 4;
+  }
+
+  /* --- збір точок --- */
+  const pr = player.r;
+  for (const o of orbs) {
+    if (d2(player.x, player.y, o.x, o.y) < (pr + o.r) * (pr + o.r)) {
+      player.score += (o.type === 'g' ? 1 : -1);
+      respawnOrb(o);
+    }
+  }
+  for (const a of ais) {
+    for (const o of orbs) {
+      if (d2(a.x, a.y, o.x, o.y) < (a.r + o.r) * (a.r + o.r)) {
+        a.score += (o.type === 'g' ? 1 : -1);
+        respawnOrb(o);
+      }
+    }
+  }
+
+  /* --- світ --- */
+  updateLines(dt);
+  updateScreens(dt);
+  for (const a of ais) updateAI(a, dt);
+}
+
+/* ============================ МАЛЮВАННЯ ============================ */
+function drawSphere(x, y, r, hue, camo, alpha, label) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const g = ctx.createRadialGradient(x - r * 0.36, y - r * 0.36, r * 0.05, x, y, r);
+  g.addColorStop(0,    `hsl(${hue}, 85%, 80%)`);
+  g.addColorStop(0.42, `hsl(${hue}, 82%, 55%)`);
+  g.addColorStop(1,    `hsl(${hue}, 88%, 20%)`);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+  ctx.fillStyle = g; ctx.fill();
+
+  /* військові прозорі плями */
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.clip();
+  for (let i = 0; i < camo.length; i++) {
+    const s = camo[i];
+    ctx.beginPath();
+    ctx.ellipse(x + s.dx * r, y + s.dy * r, s.rx * r, s.ry * r, s.rot, 0, TAU);
+    ctx.fillStyle = `hsla(${s.h}, ${s.s}%, ${s.l}%, ${s.a})`;
+    ctx.fill();
+  }
+  ctx.restore();
+
+  /* блік */
+  const hl = ctx.createRadialGradient(x - r * 0.4, y - r * 0.42, 0, x - r * 0.4, y - r * 0.42, r * 0.75);
+  hl.addColorStop(0, 'rgba(255,255,255,0.55)');
+  hl.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+  ctx.fillStyle = hl; ctx.fill();
+
+  /* кільце */
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+  ctx.strokeStyle = `hsla(${hue}, 100%, 85%, 0.65)`;
+  ctx.lineWidth = 1.6; ctx.stroke();
+
+  if (label) {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.round(r * 1.05)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 6;
+    ctx.fillText(label, x, y);
+    ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+}
+
+function drawLines() {
+  ctx.lineCap = 'round';
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    const segs = L.segs;
+    for (let j = 0; j < segs.length; j++) {
+      const sg = segs[j];
+      const hue = L.hueA + (L.hueB - L.hueA) * sg.t;
+      ctx.beginPath();
+      ctx.moveTo(sg.ax, sg.ay);
+      ctx.lineTo(sg.bx, sg.by);
+      ctx.strokeStyle = `hsl(${((hue % 360) + 360) % 360}, 92%, 62%)`;
+      ctx.lineWidth = L.w;
+      ctx.stroke();
+    }
+  }
+}
+
+function drawScreens() {
+  for (let i = 0; i < screens.length; i++) {
+    const s = screens[i];
+    if (s.x < -300 || s.x > W + 300 || s.y < -300 || s.y > H + 300) continue;
+
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(s.angle);
+
+    const hw = s.len * 0.5, hh = s.thick * 0.5, N = 22;
+    ctx.beginPath();
+    for (let j = 0; j <= N; j++) {
+      const t = j / N, x = -hw + t * s.len;
+      const y = -hh + Math.sin(t * Math.PI * s.bumps + s.bphase) * s.bumpAmp;
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    for (let j = N; j >= 0; j--) {
+      const t = j / N, x = -hw + t * s.len;
+      const y = hh + Math.sin(t * Math.PI * s.bumps + s.bphase + 1.4) * s.bumpAmp;
+      ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+
+    const g = ctx.createLinearGradient(-hw, 0, hw, 0);
+    g.addColorStop(0, `hsla(${s.hue}, 92%, 60%, 0.85)`);
+    g.addColorStop(0.5, `hsla(${s.hue + 40}, 92%, 52%, 0.85)`);
+    g.addColorStop(1, `hsla(${s.hue + 90}, 92%, 60%, 0.85)`);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${s.hue}, 100%, 82%, 0.9)`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+function drawOrbs() {
+  for (let i = 0; i < orbs.length; i++) {
+    const o = orbs[i];
+    const p = 1 + Math.sin(o.phase) * 0.16;
+    const hue = ((o.hue % 360) + 360) % 360;
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, o.r * p, 0, TAU);
+    ctx.fillStyle = `hsl(${hue}, 95%, ${o.light}%)`;
+    ctx.fill();
+    if (o.r > 4) {
+      ctx.beginPath();
+      ctx.arc(o.x - o.r * 0.28, o.y - o.r * 0.28, o.r * 0.35, 0, TAU);
+      ctx.fillStyle = `hsla(${hue}, 100%, 92%, 0.85)`;
+      ctx.fill();
+    }
+  }
+}
+
+function drawAIs() {
+  for (let i = 0; i < ais.length; i++) {
+    const a = ais[i];
+    drawSphere(a.x, a.y, a.r, a.hue, a.camo, 0.62, String(a.n));
+    ctx.save();
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = `hsla(${a.hue}, 100%, 80%, 0.95)`;
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 5;
+    ctx.fillText(String(a.score), a.x, a.y + a.r + 12);
+    ctx.restore();
+  }
+}
+
+function drawPlayer() {
+  const p = player;
+
+  /* кільце сфери */
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r + 5, 0, TAU);
+  ctx.strokeStyle = `hsla(${p.hue}, 100%, 72%, 0.45)`;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  /* стрілка руху (3px, світлі кольори) */
+  const a  = p.angle;
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const sx = p.x + ca * (p.r + 9);
+  const sy = p.y + sa * (p.r + 9);
+  const ex = sx + ca * 34;
+  const ey = sy + sa * 34;
+
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(ex, ey);
+  ctx.strokeStyle = `hsl(${p.arrowHue}, 100%, 80%)`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(ex + ca * 9, ey + sa * 9);
+  ctx.lineTo(ex - ca * 4 - sa * 7, ey - sa * 4 + ca * 7);
+  ctx.lineTo(ex - ca * 4 + sa * 7, ey - sa * 4 - ca * 7);
+  ctx.closePath();
+  ctx.fillStyle = `hsl(${p.arrowHue}, 100%, 84%)`;
+  ctx.fill();
+
+  drawSphere(p.x, p.y, p.r, p.hue, p.camo, 1, '');
+}
+
+function drawHUD() {
+  ctx.save();
+  ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = player.score >= 0 ? 'rgba(140,255,180,0.95)' : 'rgba(255,120,120,0.95)';
+  ctx.shadowColor = 'rgba(0,0,0,0.9)';
+  ctx.shadowBlur = 8;
+  ctx.fillText(String(player.score), 18, 16);
+
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(160,200,220,0.55)';
+  ctx.fillText('швидкість ' + player.speed.toFixed(2), 18, 50);
+  ctx.restore();
+}
+
+function render() {
+  /* фон */
+  const bg = ctx.createRadialGradient(W * 0.5, H * 0.5, 0, W * 0.5, H * 0.5, Math.max(W, H) * 0.8);
+  bg.addColorStop(0, '#0b1020');
+  bg.addColorStop(1, '#04050a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  drawLines();
+  drawScreens();
+  drawOrbs();
+  drawAIs();
+  drawPlayer();
+  drawHUD();
+}
+
+/* ============================ СТАРТ ============================ */
+function start() {
+  resize();
+  resetPlayer();
+  initOrbs();
+  initAIs();
+  buildLines();
+  initScreens();
+  last = performance.now();
+  requestAnimationFrame(loop);
+}
+
+let last = 0;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', () => {
+  resize();
+  player.x = clamp(player.x, player.r, W - player.r);
+  player.y = clamp(player.y, player.r, H - player.r);
+  initScreens();
+});
+
+start();
+})();
+</script>
+</body>
+</html>   
